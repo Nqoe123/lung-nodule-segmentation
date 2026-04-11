@@ -201,7 +201,7 @@ else:
         if uploaded:
             image = Image.open(uploaded).convert("L")
             original = np.array(image)
-            st.image(original, caption="Original CT Scan", use_container_width=True, clamp=True)
+            st.image(original, caption="Original CT Scan", use_container_width=True)
             
             if st.button("🔍 Segment Nodule", type="primary"):
                 with st.spinner("Segmenting..."):
