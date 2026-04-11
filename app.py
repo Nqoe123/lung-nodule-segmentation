@@ -1,6 +1,6 @@
 # app.py - Lung Nodule Segmentation Tool
 # HIT500 Capstone Project - Nqobile Maware
-# Loads model from Google Drive
+# Fixed version - handles any image type
 
 import streamlit as st
 import torch
@@ -16,7 +16,7 @@ from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
 # REPLACE THIS WITH YOUR ACTUAL FILE ID
-GOOGLE_DRIVE_FILE_ID = "1CigZy-FefSBoW7_Qxk63OfZ2yH2fOAnG"  # <-- PUT YOUR FILE ID HERE
+GOOGLE_DRIVE_FILE_ID = "YOUR_FILE_ID_HERE"  # <-- PUT YOUR FILE ID HERE
 
 MODEL_FILENAME = "best_unet_model.pth"
 
@@ -129,16 +129,32 @@ def load_model():
         st.error(f"Error loading model: {e}")
         return model, False
 
+# ========== FUNCTION TO CONVERT ANY IMAGE TO GRAYSCALE ==========
+def convert_to_grayscale(image):
+    """Convert any image to grayscale numpy array"""
+    if image.mode == 'RGBA':
+        # Convert RGBA to RGB first, then to grayscale
+        image = image.convert('RGB')
+    if image.mode != 'L':
+        # Convert to grayscale
+        image = image.convert('L')
+    return np.array(image)
+
 # ========== SEGMENTATION FUNCTIONS ==========
 
 def segment_nodule(model, image_array):
+    """Takes a CT image array, returns segmentation mask"""
+    # Ensure 2D
     if len(image_array.shape) == 3:
         image_array = image_array[:, :, 0]
     
     # Resize to 256x256
     img_resized = resize(image_array, (256, 256))
+    
+    # Normalize to [0, 1]
     img_norm = (img_resized - img_resized.min()) / (img_resized.max() - img_resized.min() + 1e-8)
     
+    # Convert to tensor
     input_tensor = torch.FloatTensor(img_norm).unsqueeze(0).unsqueeze(0)
     
     model.eval()
@@ -147,9 +163,11 @@ def segment_nodule(model, image_array):
         mask = output.squeeze().numpy()
         mask = (mask > 0.5).astype(np.float32)
     
+    # Resize mask back to original size
     return resize(mask, image_array.shape[:2])
 
 def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
+    """Estimate nodule volume in mm³"""
     pixel_area_mm2 = pixel_spacing_mm ** 2
     area_pixels = np.sum(mask)
     return area_pixels * pixel_area_mm2 * slice_thickness_mm
@@ -196,20 +214,23 @@ else:
     
     with col_left:
         st.subheader("📤 Upload CT Scan")
-        uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg"])
+        uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg", "dcm"])
         
         if uploaded:
-            image = Image.open(uploaded).convert("L")
-            original = np.array(image)
-            st.image(original, caption="Original CT Scan", use_container_width=True)
+            # Open image and convert to grayscale
+            image = Image.open(uploaded)
+            original_array = convert_to_grayscale(image)
+            
+            st.subheader("📷 Original CT Scan")
+            st.image(original_array, caption="Original CT Image", use_container_width=True)
             
             if st.button("🔍 Segment Nodule", type="primary"):
                 with st.spinner("Segmenting..."):
-                    mask = segment_nodule(model, original)
+                    mask = segment_nodule(model, original_array)
                     volume = calculate_volume(mask)
                     st.session_state['mask'] = mask
                     st.session_state['volume'] = volume
-                    st.session_state['original'] = original
+                    st.session_state['original'] = original_array
                 st.success("Segmentation complete!")
     
     with col_right:
@@ -239,12 +260,15 @@ else:
                 if original.shape != mask.shape:
                     mask = resize(mask, original.shape)
                 
-                # Create RGB overlay
+                # Normalize original for display
                 original_norm = (original - original.min()) / (original.max() - original.min() + 1e-8)
+                
+                # Create RGB overlay
                 overlay = np.stack([original_norm] * 3, axis=-1)
                 overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])
                 overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])
                 overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])
+                
                 st.image(overlay, caption="Nodule Highlighted in RED", use_container_width=True)
             
             with tab3:
