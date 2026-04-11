@@ -1,6 +1,6 @@
 # app.py - Lung Nodule Segmentation Tool
 # HIT500 Capstone Project - Nqobile Maware
-# Fixed version - handles any image type
+# Fixed for latest Streamlit version
 
 import streamlit as st
 import torch
@@ -133,10 +133,8 @@ def load_model():
 def convert_to_grayscale(image):
     """Convert any image to grayscale numpy array"""
     if image.mode == 'RGBA':
-        # Convert RGBA to RGB first, then to grayscale
         image = image.convert('RGB')
     if image.mode != 'L':
-        # Convert to grayscale
         image = image.convert('L')
     return np.array(image)
 
@@ -144,17 +142,12 @@ def convert_to_grayscale(image):
 
 def segment_nodule(model, image_array):
     """Takes a CT image array, returns segmentation mask"""
-    # Ensure 2D
     if len(image_array.shape) == 3:
         image_array = image_array[:, :, 0]
     
-    # Resize to 256x256
     img_resized = resize(image_array, (256, 256))
-    
-    # Normalize to [0, 1]
     img_norm = (img_resized - img_resized.min()) / (img_resized.max() - img_resized.min() + 1e-8)
     
-    # Convert to tensor
     input_tensor = torch.FloatTensor(img_norm).unsqueeze(0).unsqueeze(0)
     
     model.eval()
@@ -163,11 +156,9 @@ def segment_nodule(model, image_array):
         mask = output.squeeze().numpy()
         mask = (mask > 0.5).astype(np.float32)
     
-    # Resize mask back to original size
     return resize(mask, image_array.shape[:2])
 
 def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
-    """Estimate nodule volume in mm³"""
     pixel_area_mm2 = pixel_spacing_mm ** 2
     area_pixels = np.sum(mask)
     return area_pixels * pixel_area_mm2 * slice_thickness_mm
@@ -214,15 +205,15 @@ else:
     
     with col_left:
         st.subheader("📤 Upload CT Scan")
-        uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg", "dcm"])
+        uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg"])
         
         if uploaded:
-            # Open image and convert to grayscale
             image = Image.open(uploaded)
             original_array = convert_to_grayscale(image)
             
             st.subheader("📷 Original CT Scan")
-            st.image(original_array, caption="Original CT Image", use_container_width=True)
+            # FIXED: Removed use_container_width
+            st.image(original_array, caption="Original CT Image")
             
             if st.button("🔍 Segment Nodule", type="primary"):
                 with st.spinner("Segmenting..."):
@@ -260,16 +251,13 @@ else:
                 if original.shape != mask.shape:
                     mask = resize(mask, original.shape)
                 
-                # Normalize original for display
                 original_norm = (original - original.min()) / (original.max() - original.min() + 1e-8)
-                
-                # Create RGB overlay
                 overlay = np.stack([original_norm] * 3, axis=-1)
                 overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])
                 overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])
                 overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])
-                
-                st.image(overlay, caption="Nodule Highlighted in RED", use_container_width=True)
+                # FIXED: Removed use_container_width
+                st.image(overlay, caption="Nodule Highlighted in RED")
             
             with tab3:
                 area_pct = (np.sum(st.session_state['mask'] > 0.5) / st.session_state['mask'].size) * 100
