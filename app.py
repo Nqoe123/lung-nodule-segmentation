@@ -16,7 +16,7 @@ from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
 # REPLACE THIS WITH YOUR ACTUAL FILE ID
-GOOGLE_DRIVE_FILE_ID = "YOUR_FILE_ID_HERE"  # <-- PUT YOUR FILE ID HERE
+GOOGLE_DRIVE_FILE_ID = "1CigZy-FefSBoW7_Qxk63OfZ2yH2fOAnG"  # <-- PUT YOUR FILE ID HERE
 
 MODEL_FILENAME = "best_unet_model.pth"
 
