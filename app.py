@@ -24,14 +24,12 @@ st.markdown("""
     .main > div { padding: 1rem; }
     h1, h2, h3 { color: #f8fafc; }
     .stButton > button { background: #0ea5e9; color: white; border: none; border-radius: 8px; padding: 0.5rem 1rem; }
-    .stButton > button:hover { background: #0284c7; }
     .glass-panel {
         background: rgba(30, 41, 59, 0.6);
         backdrop-filter: blur(12px);
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 16px;
         padding: 1.5rem;
-        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
     }
     .section-label {
         font-size: 0.75rem;
@@ -51,6 +49,15 @@ st.markdown("""
         height: 2px;
         background: #38bdf8;
         border-radius: 2px;
+    }
+    .detection-badge {
+        display: inline-block;
+        background: #06b6d4;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        margin: 2px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -132,7 +139,7 @@ def load_model():
             break
     
     if model_path is None:
-        st.error("Model file not found. Please upload best_model.pth")
+        st.error("Model file not found")
         return None
     
     model = MemoryEfficientUNet(n_channels=1, n_classes=1)
@@ -168,16 +175,17 @@ def segment_patch(model, patch_img):
     confidence = prob.max()
     return confidence
 
-def sliding_window_on_slice(model, slice_img, patch_size=128, stride=64, confidence_threshold=0.7):
-    """Run sliding window on a single slice"""
+def analyze_slice(model, slice_img, patch_size=128, stride=64, confidence_threshold=0.65):
+    """Analyze a single slice and return best detection confidence and position"""
     h, w = slice_img.shape
-    detections = []
+    best_confidence = 0
+    best_position = None
     
     # Normalize and apply lung window
     img_norm = slice_img.astype(np.float32)
     if img_norm.max() > 1.0:
         img_norm = img_norm / 255.0
-    img_norm = apply_lung_window(img_norm * 1400 - 1000) if img_norm.max() > 0.1 else img_norm
+    img_norm = apply_lung_window(img_norm * 1400 - 1000)
     
     # Slide window
     for y in range(0, h - patch_size + 1, stride):
@@ -188,16 +196,13 @@ def sliding_window_on_slice(model, slice_img, patch_size=128, stride=64, confide
             
             confidence = segment_patch(model, patch)
             
-            if confidence > confidence_threshold:
-                detections.append({
-                    'x': x, 'y': y, 'slice': 0,  # slice index will be set later
-                    'width': patch_size, 'height': patch_size, 'confidence': confidence
-                })
+            if confidence > best_confidence:
+                best_confidence = confidence
+                best_position = (x, y)
     
-    return detections
+    return best_confidence, best_position
 
 def load_volume(zip_file):
-    """Extract and load MHD/RAW volume"""
     tmp = tempfile.mkdtemp()
     zpath = os.path.join(tmp, "upload.zip")
     with open(zpath, "wb") as f:
@@ -224,108 +229,6 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def process_volume_3d(model, volume, spacing_zyx, stride=64, confidence_threshold=0.7, slice_progress=None):
-    """Process entire 3D volume with sliding window on each slice"""
-    num_slices = volume.shape[0]
-    all_detections = []
-    
-    for slice_idx in range(num_slices):
-        if slice_progress:
-            slice_progress(slice_idx, num_slices)
-        
-        slice_img = volume[slice_idx, :, :]
-        
-        # Normalize to 0-255 range for processing
-        slice_normalized = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
-        slice_normalized = (slice_normalized * 255).astype(np.float32)
-        
-        detections = sliding_window_on_slice(model, slice_normalized, stride=stride, confidence_threshold=confidence_threshold)
-        
-        for det in detections:
-            det['slice'] = slice_idx
-            all_detections.append(det)
-    
-    # Group detections across slices (simple approach: same x,y within tolerance)
-    grouped = group_detections_across_slices(all_detections)
-    
-    return grouped
-
-def group_detections_across_slices(detections, xy_tolerance=20):
-    """Group detections that appear in consecutive slices at similar positions"""
-    if len(detections) == 0:
-        return []
-    
-    # Sort by slice
-    detections.sort(key=lambda x: x['slice'])
-    
-    groups = []
-    current_group = [detections[0]]
-    
-    for det in detections[1:]:
-        last_det = current_group[-1]
-        # Check if same slice or consecutive slice
-        slice_diff = det['slice'] - last_det['slice']
-        # Check if position is similar
-        x_diff = abs(det['x'] - last_det['x'])
-        y_diff = abs(det['y'] - last_det['y'])
-        
-        if slice_diff <= 2 and x_diff < xy_tolerance and y_diff < xy_tolerance:
-            current_group.append(det)
-        else:
-            # Finalize current group
-            if len(current_group) >= 2:  # Need at least 2 slices to consider a nodule
-                avg_confidence = np.mean([d['confidence'] for d in current_group])
-                groups.append({
-                    'id': len(groups) + 1,
-                    'slices': [d['slice'] for d in current_group],
-                    'slice_range': f"{current_group[0]['slice']}-{current_group[-1]['slice']}",
-                    'num_slices': len(current_group),
-                    'avg_confidence': avg_confidence,
-                    'position': (current_group[0]['x'], current_group[0]['y'])
-                })
-            current_group = [det]
-    
-    # Final group
-    if len(current_group) >= 2:
-        groups.append({
-            'id': len(groups) + 1,
-            'slices': [d['slice'] for d in current_group],
-            'slice_range': f"{current_group[0]['slice']}-{current_group[-1]['slice']}",
-            'num_slices': len(current_group),
-            'avg_confidence': np.mean([d['confidence'] for d in current_group]),
-            'position': (current_group[0]['x'], current_group[0]['y'])
-        })
-    
-    return groups
-
-def display_slice_with_detections(volume, slice_idx, detections, ax):
-    """Display a single slice with detection boxes"""
-    slice_img = volume[slice_idx, :, :]
-    
-    # Normalize for display
-    slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
-    
-    ax.imshow(slice_norm, cmap='gray')
-    
-    # Find detections in this slice
-    for det in detections:
-        if slice_idx in det['slices']:
-            rect = plt.Rectangle(
-                (det['position'][0], det['position'][1]),
-                128, 128,
-                fill=False, edgecolor='#06b6d4', linewidth=2
-            )
-            ax.add_patch(rect)
-            ax.text(
-                det['position'][0], det['position'][1] - 5,
-                f"N{det['id']}",
-                fontsize=8, color='#06b6d4',
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.8)
-            )
-    
-    ax.set_title(f"Slice {slice_idx}", color='#f1f5f9', fontsize=10)
-    ax.axis('off')
-
 # ============================================================
 # LOGIN PAGE
 # ============================================================
@@ -337,9 +240,8 @@ def show_login():
     with col2:
         st.markdown("""
         <div class="glass-panel" style="text-align: center; padding: 2.5rem 2rem;">
-            <div style="font-size: 3rem; margin-bottom: 0.5rem;"></div>
             <h2 style="margin-bottom: 0.5rem; font-size: 1.8rem;">LungVision AI</h2>
-            <p style="color: #94a3b8; margin-bottom: 2rem;">3D CT Volume Analysis</p>
+            <p style="color: #94a3b8;">3D CT Volume Analysis</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -351,7 +253,6 @@ def show_login():
             if submitted:
                 if username == "radiologist" and password == "hit500":
                     st.session_state.authenticated = True
-                    st.session_state.username = username
                     st.rerun()
                 else:
                     st.error("Invalid credentials")
@@ -361,32 +262,26 @@ def show_login():
 # ============================================================
 def show_app():
     st.markdown("""
-    <div class="glass-panel" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <h1 style="margin:0; font-size: 1.5rem;">LungVision <span style="color:#38bdf8">AI</span></h1>
-            <div style="color:#94a3b8; font-size: 0.85rem;">Radiologist: """ + st.session_state.get('username', 'Guest') + """ | 3D Volume Mode</div>
-        </div>
+    <div class="glass-panel" style="margin-bottom: 1.5rem;">
+        <h1 style="margin:0; font-size: 1.5rem;">LungVision AI</h1>
+        <p style="color: #94a3b8;">Full 3D CT Volume Analysis - Scans All Slices Automatically</p>
     </div>
     """, unsafe_allow_html=True)
     
     with st.sidebar:
-        st.markdown('<div class="glass-panel"><h3>Detection Settings</h3></div>', unsafe_allow_html=True)
-        confidence_threshold = st.slider("Confidence Threshold", 0.5, 0.95, 0.75, 0.05)
-        stride = st.select_slider("Window Stride (per slice)", options=[48, 64, 80, 96], value=80)
-        st.caption("Larger stride = faster but may miss nodules")
+        st.markdown("### Settings")
+        confidence_threshold = st.slider("Confidence Threshold", 0.5, 0.95, 0.65, 0.05)
+        stride = st.select_slider("Window Stride", options=[48, 64, 80, 96], value=80)
+        st.caption("Larger stride = faster but may miss small nodules")
         st.markdown("---")
         if st.button("Logout", use_container_width=True):
             st.session_state.clear()
             st.rerun()
-        st.markdown("---")
-        st.caption("Model trained on LUNA16 and LIDC")
-        st.caption("Validation Dice: 0.8871")
-        st.caption("Processing on CPU - may be slow")
     
-    st.markdown('<div class="section-label">3D CT Volume Upload</div>', unsafe_allow_html=True)
-    st.info("Upload a ZIP file containing .mhd and .raw files from a CT scan")
+    st.markdown("### Upload CT Volume")
+    st.info("Upload a ZIP file containing .mhd and .raw files. The system will scan ALL slices automatically.")
     
-    upzip = st.file_uploader("Select ZIP with .mhd and .raw files", type=["zip"], label_visibility="collapsed")
+    upzip = st.file_uploader("Select ZIP", type=["zip"], label_visibility="collapsed")
     
     if upzip is not None:
         model = load_model()
@@ -397,77 +292,113 @@ def show_app():
             volume, spacing_zyx, temp_dir = load_volume(upzip)
         
         if volume is None:
-            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files.")
+            st.error("Invalid CT volume")
         else:
             num_slices = volume.shape[0]
             st.success(f"Volume loaded: {num_slices} slices")
-            st.caption(f"Spacing: X={spacing_zyx[2]:.3f}mm, Y={spacing_zyx[1]:.3f}mm, Z={spacing_zyx[0]:.3f}mm")
+            st.caption(f"Scanning all {num_slices} slices for nodules...")
             
             # Progress bar
             progress_bar = st.progress(0)
             status_text = st.empty()
-            slice_progress_text = st.empty()
             
-            def update_progress(current, total):
-                progress_bar.progress(current / total)
-                slice_progress_text.text(f"Processing slice {current}/{total}")
+            # Analyze each slice
+            slice_confidences = []
+            slice_positions = []
             
             start_time = time.time()
             
-            # Process volume
-            detections = process_volume_3d(
-                model, volume, spacing_zyx,
-                stride=stride,
-                confidence_threshold=confidence_threshold,
-                slice_progress=update_progress
-            )
+            for i in range(num_slices):
+                status_text.text(f"Analyzing slice {i+1}/{num_slices}")
+                confidence, position = analyze_slice(
+                    model, volume[i, :, :],
+                    stride=stride,
+                    confidence_threshold=confidence_threshold
+                )
+                slice_confidences.append(confidence)
+                slice_positions.append(position)
+                progress_bar.progress((i + 1) / num_slices)
             
-            elapsed_time = time.time() - start_time
+            elapsed = time.time() - start_time
             progress_bar.empty()
-            slice_progress_text.empty()
             status_text.empty()
             
-            st.success(f"Analysis complete in {elapsed_time:.1f} seconds. Found {len(detections)} nodule(s).")
+            st.success(f"Analysis complete in {elapsed:.1f} seconds")
             
-            if detections:
-                # Display summary
-                st.markdown("### Nodule Summary")
-                for det in detections:
-                    st.markdown(f"""
-                    <div class="glass-panel" style="margin-bottom: 0.5rem;">
-                        <b>Nodule {det['id']}</b><br>
-                        Slices: {det['slice_range']} ({det['num_slices']} slices)<br>
-                        Confidence: {det['avg_confidence']:.1%}
-                    </div>
-                    """, unsafe_allow_html=True)
+            # Find slices with detections
+            detected_slices = []
+            for i, conf in enumerate(slice_confidences):
+                if conf > confidence_threshold:
+                    detected_slices.append((i, conf, slice_positions[i]))
+            
+            if detected_slices:
+                st.markdown(f"### Found {len(detected_slices)} slice(s) with potential nodules")
                 
-                # Slice viewer
-                st.markdown("### Slice Viewer")
-                slice_idx = st.slider("Select slice to review", 0, num_slices - 1, num_slices // 2)
+                # Show detected slices as badges
+                slice_badges = ""
+                for slice_idx, conf, _ in detected_slices:
+                    slice_badges += f'<span class="detection-badge">Slice {slice_idx} ({conf:.1%})</span> '
+                st.markdown(f'<div style="margin-bottom: 1rem;">{slice_badges}</div>', unsafe_allow_html=True)
                 
-                fig, ax = plt.subplots(figsize=(8, 8), facecolor='#0b1120')
-                display_slice_with_detections(volume, slice_idx, detections, ax)
+                # Let user select which slice to view
+                slice_options = [f"Slice {idx} (Confidence: {conf:.1%})" for idx, conf, _ in detected_slices]
+                selected = st.selectbox("Select slice to view", slice_options)
+                selected_idx = detected_slices[slice_options.index(selected)][0]
+                
+                # Display the selected slice
+                slice_img = volume[selected_idx, :, :]
+                slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
+                
+                fig, axes = plt.subplots(1, 2, figsize=(12, 5), facecolor='#0b1120')
+                
+                # Original
+                axes[0].imshow(slice_norm, cmap='gray')
+                axes[0].set_title(f"Slice {selected_idx} - Original", color='#f1f5f9')
+                axes[0].axis('off')
+                
+                # With detection box
+                axes[1].imshow(slice_norm, cmap='gray')
+                pos = slice_positions[selected_idx]
+                if pos:
+                    rect = plt.Rectangle(
+                        (pos[0], pos[1]), 128, 128,
+                        fill=False, edgecolor='#06b6d4', linewidth=2.5
+                    )
+                    axes[1].add_patch(rect)
+                    axes[1].text(
+                        pos[0], pos[1] - 5,
+                        f"Nodule ({slice_confidences[selected_idx]:.1%})",
+                        fontsize=9, color='#06b6d4',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='#0f172a', alpha=0.8)
+                    )
+                axes[1].set_title(f"Slice {selected_idx} - Detection", color='#f1f5f9')
+                axes[1].axis('off')
+                
+                plt.tight_layout()
                 st.pyplot(fig)
                 plt.close(fig)
                 
-                # Export results
-                import pandas as pd
-                df = pd.DataFrame([{
-                    "Nodule ID": d['id'],
-                    "Slice Range": d['slice_range'],
-                    "Number of Slices": d['num_slices'],
-                    "Confidence": f"{d['avg_confidence']:.1%}"
-                } for d in detections])
+                # Summary table
+                st.markdown("### Detection Summary")
+                summary_data = []
+                for slice_idx, conf, pos in detected_slices:
+                    summary_data.append({
+                        "Slice": slice_idx,
+                        "Confidence": f"{conf:.1%}",
+                        "Position X": pos[0] if pos else "N/A",
+                        "Position Y": pos[1] if pos else "N/A"
+                    })
                 
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("Export Results (CSV)", csv, "detection_results.csv", "text/csv")
+                import pandas as pd
+                st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+                
             else:
-                st.info("No nodules detected.")
+                st.info(f"No slices with confidence > {confidence_threshold:.0%}. Try lowering the threshold.")
             
             shutil.rmtree(temp_dir, ignore_errors=True)
     
     st.markdown("---")
-    st.caption("LungVision AI - 3D CT Volume Analysis")
+    st.caption("LungVision AI - Automatically scans all slices for nodule candidates")
 
 # ============================================================
 # ENTRY POINT
